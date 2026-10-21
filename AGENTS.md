@@ -1,0 +1,357 @@
+# AGENTS.md - Guide for AI Agents Contributing new downloads/apps/CLIs to Arkade
+
+This document provides guidance for AI agents working on arkade, specifically for reviewing and adding new CLI tools to the `arkade get` command.
+
+For system-level packages (usually Linux-only), see the `arkade system install` - usually for tools like Node.js, Go, Prometheus. Sometimes uses Go templates for tool definitions, often just uses its own code in the command.
+For binaries distributed via OCI images, see `arkade oci install`.
+
+## Types of Arkade Commands
+
+Arkade provides several types of installers:
+
+- **`arkade get`** - CLI tools usually to be placed at `/usr/local/bin/` or `$HOME/.arkade/bin/`. These are standalone binaries that can be downloaded and executed directly.
+
+- **`arkade system install`** - Linux-only system-level tools like Node.js, Go, Prometheus. These require additional installation steps or system configuration.
+
+- **`arkade oci install`** - Fetches binaries out of OCI images. Ideal for projects that use private repositories like slicer/actuated/k3sup-pro. Tools in the `arkade get` catalog may also declare an `OCIImage` field (see below), which makes them installable through `arkade get` as well.
+
+- **`arkade install`** - Kubernetes Helm charts or manifests for add-ons like OpenFaaS CE, Istio, PostgreSQL. These deploy software to Kubernetes clusters.
+
+**This guide focuses on `arkade get`** - adding CLI tools that provide static binaries for download.
+
+## 1. How to Add a New CLI (Tool) to Arkade
+
+### What Can Be Added
+
+**Only tools with static binaries** can be added to arkade. The tool must provide pre-compiled binaries for download.
+
+**Cannot be added:**
+- Python-based tools (e.g., `aws-cli`, `azure-cli`) - require Python runtime
+- Node.js-based tools without static binaries - require Node.js runtime
+- Tools that require installation scripts or package managers
+- Tools that need runtime dependencies beyond the binary itself
+
+### Prerequisites
+
+1. Fork and create a branch: `git checkout -b add-TOOL_NAME`
+
+### Step 1: Check GitHub Releases
+
+**CRITICAL**: Before writing code, check the latest stable release on GitHub to see what OS/architecture combinations are available.
+
+1. Run a `curl -i -X HEAD https://github.com/OWNER/REPO/releases/latest` (adds `/latest` to go directly to the latest release) - change OWNER and REPO accordingly. The `location` header in the response will show the actual latest version tag without using up an API request. To obtain the `location` header, you must not use the `-L` (follow redirects) flag.
+2. Examine ALL download URLs in the "Assets" section, you can obtain this via HTML, again to avoid consuming API requests: `https://github.com/OWNER/REPO/releases/expanded_assets/VERSION` - replace VERSION with the actual version tag from 1. and the OWNER/REPO accordingly. This returns HTML, you can grep it efficiently for anchor tags.
+3. Note available combinations:
+   - Linux amd64 (x86_64)
+   - Linux arm64 (aarch64)
+   - Darwin amd64 (x86_64)
+   - Darwin arm64
+   - Windows amd64 (x86_64)
+
+**Important**: Match the exact naming used by the upstream project (`amd64` vs `x86_64`, `arm64` vs `aarch64`).
+
+### Step 2: Add Tool Definition
+
+Edit `pkg/get/tools.go` and add a new `Tool` entry. **Reference existing examples** like `faas-cli` (lines 27-50) for the structure.
+
+**Key points:**
+- Use `BinaryTemplate` for GitHub releases (simpler)
+- Use `URLTemplate` for custom URLs or non-GitHub sources
+- Supported archive formats: `.tar.gz`, `.zip`, `.tgz`, `.bz2`, `.tar.xz`
+- Template variables: `.OS`, `.Arch`, `.Name`, `.Version`, `.VersionNumber`, `.Repo`, `.Owner`
+- Windows detection: `HasPrefix .OS "ming"`
+- **CRITICAL**: If a binary is missing for a specific OS/arch (e.g., Windows amd64), the template must still generate a URL that results in a 404 error, NOT download the wrong binary (e.g., don't download Linux binary when Windows was requested)
+
+#### Archive tools: when the binary name inside the archive differs from the tool name
+
+When a tool is distributed as an archive (`.tar.gz`, `.tgz`, `.zip`, `.bz2`, `.tar.xz`) and the **binary inside the archive** has a platform-specific name (e.g., `mytool-darwin-arm64` rather than just `mytool`), you **must** use both `URLTemplate` and `BinaryTemplate` together:
+
+- **`URLTemplate`** — the full download URL including the archive extension (e.g., `https://github.com/.../mytool-darwin-arm64.tgz`)
+- **`BinaryTemplate`** — the name of the **binary inside the archive**, without the archive extension (e.g., `mytool-darwin-arm64`)
+
+**Do NOT** put the archive filename (with `.tgz`/`.tar.gz`/`.zip`/`.bz2`/`.tar.xz` extension) in `BinaryTemplate` alone. The `decompress()` function in `pkg/get/download.go` uses `BinaryTemplate` to locate the extracted binary. If `BinaryTemplate` contains an archive extension, decompress falls back to `tool.Name` which will be wrong when the inner binary has a platform suffix.
+
+**Reference example**: `inletsctl` in `pkg/get/tools.go` — uses `URLTemplate` for the download URL and `BinaryTemplate` for the inner binary name.
+
+**When `BinaryTemplate` alone is safe**: Only when the tool is a **plain binary** (not an archive). In that case `BinaryTemplate` is the release asset filename, and the downloaded file is used directly without decompression.
+
+### Step 3: Write Unit Tests
+
+Add a test function in `pkg/get/get_test.go`. **Reference `Test_DownloadFaasCli`** (around line 2761) as an example.
+
+**Requirements:**
+- Use a pinned version (not "latest")
+- Test all available OS/arch combinations
+- Verify URLs match actual GitHub release URLs
+
+### Step 4: Download and Verify Every OS/Arch Combination
+
+First test downloading the current OS/arch (no flags needed) i.e. `go run . get TOOL`. And run `file` on the output to verify the type and if it's valid or invalid i.e. a gzip, or a HTML page, or got a non zero exit code.
+
+**MANDATORY**: Download and verify EVERY combination using the `file` command.
+
+```bash
+# Build arkade
+go build
+
+# Test all combinations (script automates this)
+./hack/test-tool.sh TOOL_NAME
+```
+
+For each combination, verify the `file` command output:
+- Linux amd64: `ELF 64-bit LSB executable, x86-64`
+- Linux arm64: `ELF 64-bit LSB executable, ARM aarch64`
+- Darwin amd64: `Mach-O 64-bit x86_64 executable`
+- Darwin arm64: `Mach-O 64-bit arm64 executable`
+- Windows amd64: `PE32+ executable (console) x86-64`
+
+Tools built with Rust often have `unknown` in their filename, that's OK. If deciding between GNU aka libc or musl, pick the musl version.
+
+**Include the full output of `./hack/test-tool.sh TOOL_NAME` in your PR description.**
+
+### Step 5: Update Documentation
+
+The README.md file contains instructions for updating itself. Follow the note at the bottom of the "Catalog of CLIs" section: run `go run . get --format markdown` to generate the updated table, then replace the existing catalog section. Write it to a file in the workspace that you delete after, to avoid needing extra permissions.
+
+**CRITICAL**: The README.md has markers that MUST be preserved: `<!-- start of tool list -->` and `<!-- end of tool list -->`. Do NOT delete these comments when updating the table.
+
+To update:
+1. Save the markdown output to a local file: `go run . get --format markdown > TOOLS.md`
+2. Extract lines before the table (before `<!-- start of tool list -->`)
+3. Replace the table content with the new markdown
+4. Preserve both `<!-- start of tool list -->` and `<!-- end of tool list -->` markers
+5. Update the tool count at the end
+
+Replace everything between `<!-- start of tool list -->` and `<!-- end of tool list -->` (inclusive of the table rows and tool count line, exclusive of the markers themselves).
+
+**Marker gotcha**: do not splice the README by pre-computed line numbers - they
+drift if the file is edited part-way through. Splice by matching the marker
+strings themselves, in a single pass, and verify afterwards:
+
+```bash
+grep -c "start of tool list\|end of tool list" README.md
+```
+
+This must print `2`. If it prints anything else, fix the file before
+continuing.
+
+**Count line gotcha**: the "There are N tools, use `arkade get NAME` to
+download one." line is emitted by `go run . get --format markdown` as part of
+the table output. Treat it as inside the markers - replace the old count line
+rather than keeping it, or you will end up with duplicates.
+
+**Apostrophe gotcha**: some tool descriptions in `tools.go` contain curly apostrophes (`'` U+2019) instead of straight ASCII ones (`'` U+0027). After updating the README with `go run . get --format markdown`, check for this with:
+
+```bash
+rg -P "\xe2\x80\x99" README.md
+```
+
+If any appear in the table rows, revert those lines to their original content (straight apostrophes) using `git checkout -- README.md` and re-apply only the new tool entry. Never let curly apostrophes into the file.
+
+
+### Step 6: Create Pull Request
+
+**PR Description must include:**
+- List of available/unavailable OS/arch combinations from GitHub releases page
+- Full output from `./hack/test-tool.sh TOOL_NAME` showing `file` command results
+- Output from `make e2e` (if applicable)
+
+**Checklist:**
+- [ ] All commits signed off (`git commit -s`)
+- [ ] Unit tests pass
+- [ ] All OS/arch combinations verified with `file` command
+- [ ] README.md updated
+- [ ] PR description includes verification output
+
+### Architecture Support Reference
+
+| OS | Architecture | Const name | Notes |
+|---|---|---|---|
+| macOS (Intel) | x86_64 | `arch64bit` | Intel Macs |
+| macOS (Apple Silicon) | arm64 | `archDarwinARM64` | M1/M2/M3 Macs |
+| Linux | x86_64 | `arch64bit` | Standard Linux |
+| Linux | aarch64/arm64 | `archARM64` | ARM64 Linux |
+| Windows | x86_64 | `arch64bit` | Windows (Git Bash) |
+
+**Note**: Do not add ARMv6 or 32-bit x86 support.
+
+### Troubleshooting
+
+- **URLs don't match**: Check actual release URLs on GitHub and adjust template
+- **Wrong architecture in binary**: Verify binary names on GitHub releases page
+- **Missing combinations**: Document why in PR description if upstream doesn't provide them. The template must still generate a URL that returns 404 (not download the wrong binary)
+- **Downloads wrong binary**: If requesting Windows but getting Linux binary, the template is incorrectly falling back. Each OS/arch must have a unique URL that matches the actual release or returns 404
+- **"stat ... no such file or directory" after extraction**: The binary name inside the archive doesn't match what `decompress()` expects. This happens when `BinaryTemplate` alone contains an archive extension (`.tgz`, `.tar.gz`, `.zip`) — the code falls back to `tool.Name` instead of the platform-specific binary name. Fix by splitting into `URLTemplate` (download URL) + `BinaryTemplate` (inner binary name without extension). See the "Archive tools" section above.
+
+---
+
+## 1b. Adding an OCI-Extracted Tool (installable via both `arkade get` and `arkade oci install`)
+
+Some tools ship their binaries inside OCI images (e.g. `ghcr.io/openfaasltd/signet`) instead of
+GitHub release assets. These are defined **without** `URLTemplate`/`BinaryTemplate`, using the
+`OCIImage` field instead:
+
+```go
+Tool{
+    Name:        "signet",
+    Description: "Lightweight OpenID Connect provider for agents and automation",
+    OCIImage:    "ghcr.io/openfaasltd/signet",
+},
+```
+
+Key behaviour (`pkg/get/oci.go`):
+
+- `arkade get NAME` pulls the image with anonymous auth, extracts it to a temp dir, finds the
+  binary named `tool.Name` (`.exe` on Windows) at any depth, and installs it to
+  `$HOME/.arkade/bin/` (or `--path`).
+- Versions resolve to the registry's `latest` tag unless the tool is pinned or the user passes
+  `tool@tag` / `--version`. No GitHub release lookup happens.
+- Unsupported OS/arch values fail fast with a clear error before any pull (amd64/arm64 on
+  linux/darwin/windows only).
+- `arkade oci install NAME` continues to work via its own alias table in `cmd/oci/install.go`
+  (`resolveShortcutImage`) — keep both surfaces in sync when adding a tool.
+
+When adding an OCI tool:
+
+- Set only `Name`, `Description` and `OCIImage` (no `Owner`/`Repo`, they are unused).
+- Skip `./hack/test-tool.sh` — there is no download URL. Instead verify each OS/arch with
+  `arkade get NAME --os ... --arch ... --path /tmp/x` and `file` the result.
+- The URL checker (`Test_CheckTools`) skips OCI tools automatically; no test change needed.
+- `go run . get --format markdown` renders OCI tools as plain names (no GitHub link), so the
+  README table needs no extra column.
+- If the image is private, `arkade oci install` supports authenticated pulls; the `arkade get`
+  path is anonymous-only — document which applies in the PR.
+
+---
+
+## 2. How to Review a New CLI Being Added as an AI Agent
+
+### Pre-Review Checklist
+
+- [ ] Issue has `design/approved` label
+- [ ] All commits signed off
+- [ ] PR adds only one tool
+
+### Code Review
+
+#### Tool Definition (`pkg/get/tools.go`)
+
+- [ ] Tool provides static binaries (not Python/Node.js-based)
+- [ ] Required fields: `Name`, `Owner`, `Repo`, `Description`
+- [ ] Either `BinaryTemplate` or `URLTemplate` provided
+- [ ] Supports required OS/arch combinations (Linux amd64/arm64, Darwin amd64/arm64, Windows amd64)
+- [ ] Archive format is `.tar.gz`, `.zip`, `.bz2`, or `.tar.xz`
+- [ ] Missing OS/arch combinations generate URLs that return 404 (not download wrong binary)
+
+#### Unit Tests (`pkg/get/get_test.go`)
+
+- [ ] Test function exists with pinned version
+- [ ] Test cases for all available platforms
+- [ ] URLs match actual GitHub release URLs
+
+#### Documentation
+
+- [ ] README.md updated with tool entry
+
+#### PR Description
+
+- [ ] **CRITICAL**: Includes `file` command output for **every** OS/arch combination
+- [ ] Documents which OS/arch combinations are available from upstream
+- [ ] Includes output from `./hack/test-tool.sh TOOL_NAME`
+- [ ] Includes output from `make e2e` (if applicable)
+
+### Critical Review: Binary Verification
+
+**MANDATORY**: Verify `file` command output for every combination shows correct architecture:
+- Linux amd64: `ELF 64-bit LSB executable, x86-64`
+- Linux arm64: `ELF 64-bit LSB executable, ARM aarch64`
+- Darwin amd64: `Mach-O 64-bit x86_64 executable`
+- Darwin arm64: `Mach-O 64-bit arm64 executable`
+- Windows amd64: `PE32+ executable (console) x86-64`
+
+**If missing, request it before approving.**
+
+### Review Commands
+
+```bash
+go build && ./hack/test-tool.sh TOOL_NAME
+go test ./pkg/get/... -v
+./arkade get --format markdown | grep TOOL_NAME
+```
+
+### Common Issues
+
+1. Tool requires runtime (Python/Node.js) - cannot be added
+2. Missing `file` command output for all combinations
+3. URLs don't match actual GitHub releases
+4. Missing architecture support
+5. Wrong architecture mapping (`arm64` vs `aarch64`, `amd64` vs `x86_64`)
+6. Using unsupported archive format — only `.tar.gz`, `.zip`, `.tgz`, `.bz2`, and `.tar.xz` are supported
+7. Template downloads wrong binary when combination is missing (e.g., downloads Linux when Windows requested) - must return 404 instead
+
+---
+
+## When to Pin a Tool to a Specific Version
+
+`arkade get` resolves the latest release automatically via the GitHub version
+strategy. Set the `Version` field on a `Tool` only when auto-resolution would
+break the download. Typical cases:
+
+- The latest release ships **no binaries** (only source archives), e.g.
+  kube-burner v2.8.2, grafana-agent v0.44.3.
+- The upstream repo is not a normal GitHub release source, so the URL needs a
+  specific tag.
+- The latest tag does not follow the asset naming the template relies on.
+
+**Every pin MUST carry a terse justification in a comment directly above the
+`Version` field**, following the existing style:
+
+```go
+// v0.44.3 (latest) has no binaries, only source archives, so pinned at v0.44.2.
+Version: "v0.44.2",
+```
+
+The comment MUST also:
+- **Reference the upstream issue + URL** when a pin is raised because of an
+  upstream problem (e.g. a broken release), so a future agent can track it.
+- **State whether the pin is expected to be `transient` or `permanent`.** A
+  `transient` pin is one upstream is expected to fix (e.g. binaries restored in
+  a later release) - revisit it periodically to see if it can be dropped. A
+  `permanent` pin is one that will never change (e.g. the upstream tag naming
+  does not follow the template) - this is a hint **not** to keep revisiting it.
+
+Example of a transient pin raised against upstream:
+
+```go
+// Pinned to v2.8.1, transient: v2.8.2 (latest) ships no binaries.
+// Upstream issue kube-burner/kube-burner#1296
+// https://github.com/kube-burner/kube-burner/issues/1296
+// Unpin once binaries are restored.
+Version: "v2.8.1",
+```
+
+Without a comment, a future agent has no way to know whether the pin is still
+needed. When checking whether a transient pin can be removed, fetch the latest
+release assets (HTML API) and confirm the binaries now exist under the pinned
+version's naming before dropping the `Version` field and its comment. Do not
+revisit permanent pins.
+
+## Commenting on Upstream Repos
+
+When a pin is raised against an upstream problem, you may offer to file an
+issue/comment on their repo on the user's behalf - but only ever do so with
+**explicit authorization from the user**, and confirm the wording with them
+first. Do not post anything upstream unprompted.
+
+---
+
+## Reference Examples
+
+- **Simple BinaryTemplate**: `faas-cli` (lines 27-50 in `pkg/get/tools.go`)
+- **Test example**: `Test_DownloadFaasCli` (around line 2761 in `pkg/get/get_test.go`)
+- **Recent additions**: `dufs` (commit a120f8c), `logcli` (commit 4f72efe), `ripgrep` (commit a80f284)
+
+## Additional Resources
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) - General contribution guidelines
+- [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) - PR template

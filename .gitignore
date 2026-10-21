@@ -1,0 +1,13 @@
+arkade
+arkade.exe
+bin/**
+kubeconfig
+.DS_Store
+.idea/
+mc
+/arkade-*
+/faas-cli*
+test.out
+docker-compose.yaml*
+TOOLS.md
+/.claude/settings.local.json

@@ -1,0 +1,60 @@
+// Copyright (c) arkade author(s) 2022. All rights reserved.
+// Licensed under the MIT license. See LICENSE file in the project root for full license information.
+
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/alexellis/arkade/cmd"
+	"github.com/alexellis/arkade/cmd/chart"
+	"github.com/alexellis/arkade/cmd/docker"
+	"github.com/alexellis/arkade/cmd/fstail"
+	"github.com/alexellis/arkade/cmd/gha"
+	"github.com/alexellis/arkade/cmd/oci"
+	"github.com/alexellis/arkade/cmd/system"
+	"github.com/alexellis/arkade/pkg"
+	"github.com/spf13/cobra"
+)
+
+func main() {
+	printarkadeASCIIArt := cmd.PrintArkadeASCIIArt
+
+	var rootCmd = &cobra.Command{
+		Use: "arkade",
+		Run: func(cmd *cobra.Command, args []string) {
+			printarkadeASCIIArt()
+			short := "n/a"
+			if len(pkg.GitCommit) > 12 {
+				short = pkg.GitCommit[:12]
+			} else if len(pkg.GitCommit) > 0 {
+				short = pkg.GitCommit
+			}
+			fmt.Printf("Version: %s (%s)\n\n\n", pkg.BuildString(), short)
+			cmd.Help()
+		},
+	}
+
+	rootCmd.AddCommand(cmd.MakeInstall())
+	rootCmd.AddCommand(cmd.MakeVersion())
+	rootCmd.AddCommand(cmd.MakeInfo())
+	rootCmd.AddCommand(cmd.MakeUpdate())
+	rootCmd.AddCommand(cmd.MakeGet())
+	rootCmd.AddCommand(cmd.MakeUninstall())
+	rootCmd.AddCommand(cmd.MakeShellCompletion())
+
+	rootCmd.AddCommand(cmd.MakeRelease())
+
+	rootCmd.AddCommand(chart.MakeChart())
+	rootCmd.AddCommand(docker.MakeDocker())
+	rootCmd.AddCommand(fstail.MakeFstail())
+	rootCmd.AddCommand(gha.MakeGHA())
+	rootCmd.AddCommand(system.MakeSystem())
+	rootCmd.AddCommand(oci.MakeOci())
+	rootCmd.AddCommand(cmd.MakeSearch())
+
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}

@@ -1,0 +1,32 @@
+// Copyright (c) arkade author(s) 2022. All rights reserved.
+// Licensed under the MIT license. See LICENSE file in the project root for full license information.
+
+// system contains packages for Linux servers and workstations
+package oci
+
+import (
+	"github.com/spf13/cobra"
+)
+
+func MakeOci() *cobra.Command {
+
+	command := &cobra.Command{
+		Use:     "oci",
+		Aliases: []string{"o"},
+		Short:   "Install files from OCI/container images",
+		Long:    `Install files from OCI/container images to a given path.`,
+		Example: `  arkade oci install [container image]
+  arkade oci i [container image]`,
+		SilenceUsage: true,
+	}
+
+	command.RunE = func(cmd *cobra.Command, args []string) error {
+		return cmd.Usage()
+	}
+
+	command.AddCommand(MakeOciInstall())
+	command.AddCommand(MakeOciPublish())
+	command.AddCommand(MakeOciLogin())
+
+	return command
+}
